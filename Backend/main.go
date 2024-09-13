@@ -14,15 +14,14 @@ import (
 
 var ctx = context.Background()
 
-// Connect to PostgreSQL and Redis
 func connectDB() (*pgx.Conn, *redis.Client) {
-	// PostgreSQL connection
+
 	conn, err := pgx.Connect(ctx, "postgres://postgres:Angad@04@localhost:5432/authdb")
 	if err != nil {
 		log.Fatal("Unable to connect to PostgreSQL:", err)
 	}
 
-	// Redis connection
+
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 	})
@@ -54,24 +53,20 @@ func checkPasswordHash(password, hash string) bool {
 }
 
 func RegisterHandler(w http.ResponseWriter, r *http.Request) {
-	// Parse form data
 	email := r.FormValue("email")
 	password := r.FormValue("password")
 
-	// Hash the password
 	hashedPassword, err := hashPassword(password)
 	if err != nil {
 		http.Error(w, "Error hashing password", http.StatusInternalServerError)
 		return
 	}
 
-	// Store in PostgreSQL
 	conn, _ := connectDB()
 	defer conn.Close(ctx)
 
 	_, err = conn.Exec(ctx, "INSERT INTO users (email, password) VALUES ($1, $2)", email, hashedPassword)
 	if err != nil {
-		// Log the detailed error
 		log.Printf("Error saving user to the database: %v", err)
 		http.Error(w, "Error saving user to the database", http.StatusInternalServerError)
 		return
@@ -81,11 +76,9 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
-	// Parse form data
 	email := r.FormValue("email")
 	password := r.FormValue("password")
 
-	// Retrieve user from PostgreSQL
 	conn, _ := connectDB()
 	defer conn.Close(ctx)
 
@@ -96,7 +89,6 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if the password matches
 	if !checkPasswordHash(password, hashedPassword) {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
