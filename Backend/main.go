@@ -1,98 +1,160 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"net/http"
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
 
-	"github.com/go-redis/redis/v8"
-	"github.com/gorilla/mux"
-	"github.com/jackc/pgx/v5"
-	"golang.org/x/crypto/bcrypt"
+    "github.com/go-redis/redis/v8"
+    "github.com/gorilla/mux"
+    "github.com/jackc/pgx/v5"
+    "golang.org/x/crypto/bcrypt"
+    "github.com/rs/cors"
 )
 
 var ctx = context.Background()
 
-func connectDB() (*pgx.Conn, *redis.Client) {
-
-	conn, err := pgx.Connect(ctx, "postgres://postgres:Angad@04@localhost:5432/authdb")
-	if err != nil {
-		log.Fatal("Unable to connect to PostgreSQL:", err)
-	}
-
-
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
-
-	return conn, redisClient
+// Database connection function
+func connectDB() (*pgx.Conn, error) {
+    conn, err := pgx.Connect(ctx, "postgres://postgres:Angad@04@localhost:5432/authdb")
+    if err != nil {
+        return nil, err
+    }
+    return conn, nil
 }
 
 func main() {
-	conn, redisClient := connectDB()
-	defer conn.Close(ctx)
-	defer redisClient.Close()
+    // Redis client setup (optional, can be removed if not used)
+    redisClient := redis.NewClient(&redis.Options{
+        Addr: "localhost:6379",
+    })
+    defer redisClient.Close()
 
-	router := mux.NewRouter()
-	router.HandleFunc("/register", RegisterHandler).Methods("POST")
-	router.HandleFunc("/login", LoginHandler).Methods("POST")
+    // Router setup
+    router := mux.NewRouter()
+    router.HandleFunc("/register", RegisterHandler).Methods("POST")
+    router.HandleFunc("/login", LoginHandler).Methods("POST")
 
-	log.Println("Starting server on port 8080...")
-	log.Fatal(http.ListenAndServe(":8080", router))
+    // Enable CORS
+    c := cors.New(cors.Options{
+        AllowedOrigins:   []string{"http://localhost:3000"},
+        AllowCredentials: true,
+        AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE"},
+        AllowedHeaders:   []string{"Content-Type", "Authorization"},
+    })
+    handler := c.Handler(router)
+
+    // Start the server
+    log.Println("Starting server on port 8080...")
+    log.Fatal(http.ListenAndServe(":8080", handler))
 }
 
+// Password hashing function
 func hashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
-	return string(bytes), err
+    bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
+    return string(bytes), err
 }
 
+// Password comparison function
 func checkPasswordHash(password, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	return err == nil
+    err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+    return err == nil
 }
 
+// Struct for user registration request
+type RegisterRequest struct {
+    Username string `json:"username"`
+    Email    string `json:"email"`
+    Password string `json:"password"`
+    Address  string `json:"address"`
+    State    string `json:"state"`
+    City     string `json:"city"`
+}
+
+// RegisterHandler - Handles the user registration
 func RegisterHandler(w http.ResponseWriter, r *http.Request) {
-	email := r.FormValue("email")
-	password := r.FormValue("password")
+    var req RegisterRequest
 
-	hashedPassword, err := hashPassword(password)
-	if err != nil {
-		http.Error(w, "Error hashing password", http.StatusInternalServerError)
-		return
-	}
+    // Parse the JSON request body
+    err := json.NewDecoder(r.Body).Decode(&req)
+    if err != nil {
+        http.Error(w, "Invalid request payload", http.StatusBadRequest)
+        return
+    }
 
-	conn, _ := connectDB()
-	defer conn.Close(ctx)
+    // Check if required fields are provided
+    if req.Username == "" || req.Email == "" || req.Password == "" {
+        http.Error(w, "Missing required fields", http.StatusBadRequest)
+        return
+    }
 
-	_, err = conn.Exec(ctx, "INSERT INTO users (email, password) VALUES ($1, $2)", email, hashedPassword)
-	if err != nil {
-		log.Printf("Error saving user to the database: %v", err)
-		http.Error(w, "Error saving user to the database", http.StatusInternalServerError)
-		return
-	}
+    // Hash the password
+    hashedPassword, err := hashPassword(req.Password)
+    if err != nil {
+        http.Error(w, "Error hashing password", http.StatusInternalServerError)
+        return
+    }
 
-	fmt.Fprintln(w, "Registration successful")
+    // Save the user in the database
+    conn, err := connectDB()
+    if err != nil {
+        log.Printf("Error connecting to the database: %v", err)
+        http.Error(w, "Database connection error", http.StatusInternalServerError)
+        return
+    }
+    defer conn.Close(ctx)
+
+    _, err = conn.Exec(ctx, "INSERT INTO users (username, email, password, address, state, city) VALUES ($1, $2, $3, $4, $5, $6)",
+        req.Username, req.Email, hashedPassword, req.Address, req.State, req.City)
+    if err != nil {
+        log.Printf("Error saving user to the database: %v", err)
+        http.Error(w, "Error saving user to the database", http.StatusInternalServerError)
+        return
+    }
+
+    // Return success response
+    fmt.Fprintln(w, "Registration successful")
 }
 
+// Struct for login request
+type User struct {
+    Email    string `json:"email"`
+    Password string `json:"password"`
+}
+
+// LoginHandler - Handles user login
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
-	email := r.FormValue("email")
-	password := r.FormValue("password")
+    var user User
 
-	conn, _ := connectDB()
-	defer conn.Close(ctx)
+    // Parse the JSON request body
+    if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+        http.Error(w, "Invalid request payload", http.StatusBadRequest)
+        return
+    }
 
-	var hashedPassword string
-	err := conn.QueryRow(ctx, "SELECT password FROM users WHERE email=$1", email).Scan(&hashedPassword)
-	if err != nil {
-		http.Error(w, "User not found", http.StatusUnauthorized)
-		return
-	}
+    // Check the database for the user
+    conn, err := connectDB()
+    if err != nil {
+        http.Error(w, "Unable to connect to database", http.StatusInternalServerError)
+        return
+    }
+    defer conn.Close(ctx)
 
-	if !checkPasswordHash(password, hashedPassword) {
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-		return
-	}
+    var hashedPassword string
+    err = conn.QueryRow(ctx, "SELECT password FROM users WHERE email=$1", user.Email).Scan(&hashedPassword)
+    if err != nil {
+        http.Error(w, "User not found", http.StatusUnauthorized)
+        return
+    }
 
-	fmt.Fprintln(w, "Login successful")
+    // Check the password hash
+    if !checkPasswordHash(user.Password, hashedPassword) {
+        http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+        return
+    }
+
+    // Return success response
+    fmt.Fprintln(w, "Login successful")
 }
